@@ -9,7 +9,9 @@ from torch.optim.lr_scheduler import StepLR
 from torch.utils.data.sampler import SubsetRandomSampler
 
 import os
-
+import numpy as np
+from matplotlib import pyplot as plt
+import csv
 '''
 This code is adapted from two sources:
 (i) The official PyTorch MNIST example (https://github.com/pytorch/examples/blob/master/mnist/main.py)
@@ -83,9 +85,28 @@ class Net(nn.Module):
     '''
     def __init__(self):
         super(Net, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels=1, out_channels=8, kernel_size=(3,3), stride=1)
+     
+        self.dropout1 = nn.Dropout2d(.1)
+     
+        self.fc0 = nn.Linear(1352, 64)
+        self.fc1 = nn.Linear(64, 10)
+    
 
     def forward(self, x):
-        return x
+        x = self.conv1(x)
+        x = F.relu(x)
+        x = F.avg_pool2d(x, 2)
+        x = self.dropout1(x)
+
+        x = torch.flatten(x, 1)
+        x = self.fc0(x)
+        x = F.relu(x)
+        x = self.fc1(x)
+     
+        output = F.log_softmax(x, dim=1)
+        return output
+
 
 
 def train(args, model, device, train_loader, optimizer, epoch):
@@ -94,18 +115,32 @@ def train(args, model, device, train_loader, optimizer, epoch):
     trained for 1 epoch.
     '''
     model.train()   # Set the model to training mode
+    train_loss= 0
+    train_accuracy = 0
+
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()               # Clear the gradient
         output = model(data)                # Make predictions
         loss = F.nll_loss(output, target)   # Compute loss
+        train_loss += loss
         loss.backward()                     # Gradient computation
         optimizer.step()                    # Perform a single optimization step
+        ## added for assignment
+        pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+        correct = pred.eq(target.view_as(pred)).sum().item()
+        train_accuracy += correct # accuracy per batch
+        
+        
         if batch_idx % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader), loss.item()))
-
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+                epoch, batch_idx * len(data), len(train_loader.sampler),
+                100. * batch_idx * len(data) / len(train_loader.sampler), loss.item(),
+                correct, len(output),
+                100. * correct / len(output)))
+    train_loss /= len(train_loader.sampler)
+    train_accuracy /= len(train_loader.sampler)
+    return train_accuracy,train_loss
 
 def test(model, device, test_loader):
     model.eval()    # Set the model to inference mode
@@ -119,12 +154,13 @@ def test(model, device, test_loader):
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()
 
-    test_loss /= len(test_loader.dataset)
-
+    test_loss /= len(test_loader.sampler)
+    
+    accuracy = correct / len(test_loader.sampler)
     print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(test_loader.dataset),
-        100. * correct / len(test_loader.dataset)))
-
+        test_loss, correct, len(test_loader.sampler),
+        100. * correct / len(test_loader.sampler)))
+    return accuracy,test_loss
 
 def main():
     # Training settings
@@ -170,7 +206,7 @@ def main():
         assert os.path.exists(args.load_model)
 
         # Set the test model
-        model = fcNet().to(device)
+        model = Net().to(device)
         model.load_state_dict(torch.load(args.load_model))
 
         test_dataset = datasets.MNIST('../data', train=False,
@@ -182,12 +218,20 @@ def main():
         test_loader = torch.utils.data.DataLoader(
             test_dataset, batch_size=args.test_batch_size, shuffle=True, **kwargs)
 
-        test(model, device, test_loader)
-
-        return
+        test_accuracy,test_loss = test(model, device, test_loader)
+        import csv
+        exp_name = 'best_Net_test_full'
+        with open('./figures/'+exp_name+'.csv', 'w', newline='') as csvfile:
+            spamwriter = csv.writer(csvfile, delimiter=' ',
+                                quotechar='|', quoting=csv.QUOTE_MINIMAL)
+            spamwriter.writerow(['TEST_ACCURACY','TEST_LOSS'])
+            spamwriter.writerow([test_accuracy,test_loss])
+   
+    
+        return 
 
     # Pytorch has default MNIST dataloader which loads data at each iteration
-    train_dataset = datasets.MNIST('../data', train=True, download=True,
+    train_dataset = datasets.MNIST('./data', train=True, download=True,
                 transform=transforms.Compose([       # Data preprocessing
                     transforms.ToTensor(),           # Add data augmentation here
                     transforms.Normalize((0.1307,), (0.3081,))
@@ -197,20 +241,101 @@ def main():
     # training by using SubsetRandomSampler. Right now the train and validation
     # sets are built from the same indices - this is bad! Change it so that
     # the training and validation sets are disjoint and have the correct relative sizes.
-    subset_indices_train = range(len(train_dataset))
-    subset_indices_valid = range(len(train_dataset))
-
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size,
-        sampler=SubsetRandomSampler(subset_indices_train)
-    )
+    ##########################################################################
+    ######################## my code starts here #############################
+    ##########################################################################
+    #split the dataset into training and validation sets
+    
+    train_loader_all = torch.utils.data.DataLoader(train_dataset)
+    examples = enumerate(train_loader_all)
+    train_raw_idx = []
+    train_raw_target = []
+    for i in examples:
+            train_raw_idx.append(i[0])
+            train_raw_target.append(i[1][1].numpy()[0])
+    target_keys  = list(set(train_raw_target))
+    train_raw_target = np.array(train_raw_target)
+    train_raw_idx = np.array(train_raw_idx)
+    
+    target_idx = {}
+    val_idx = {}
+    train_idx = {}
+    subset_indices_train = []
+    subset_indices_valid = []
+    for i in target_keys:
+        np.random.seed(i)
+        target_idx[i] = train_raw_idx[np.where(train_raw_target==i)[0]]
+        np.random.shuffle(target_idx[i])
+    #     print(np.all(train_raw_target[target_idx[i]]==i))
+        split_point= int(0.15 * len(target_idx[i]))
+        val_idx[i] = target_idx[i][:split_point]
+        train_idx[i] = target_idx[i][split_point:]
+    #     print(len(target_idx[i]) == len(val_idx[i])+len(train_idx[i]))
+    #     print(len(val_idx[i])/len(target_idx[i]))
+        subset_indices_train = subset_indices_train + list(train_idx[i])
+        subset_indices_valid = subset_indices_valid + list(val_idx[i])
+    subset_indices_train = np.array(subset_indices_train)
+    subset_indices_valid = np.array(subset_indices_valid)
+    np.random.seed(10)
+    np.random.shuffle(subset_indices_train)
+    np.random.seed(11)
+    np.random.shuffle(subset_indices_valid)
+    
+    
     val_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size,
+        train_dataset, batch_size=args.test_batch_size,
         sampler=SubsetRandomSampler(subset_indices_valid)
     )
+    
+    # add data augmentation
+    train_dataset_aug = datasets.MNIST('./data', train=True, download=True,
+                transform=transforms.Compose([       # Data preprocessing
+#                     transforms.RandomResizedCrop(28,scale=(0.9,1.1)),
+#                     transforms.RandomRotation(3),
+                    transforms.RandomAffine(3, scale=(0.9,1.1),shear=3),
+                    transforms.ToTensor(),           # Add data augmentation here
+                    transforms.Normalize((0.1307,), (0.3081,))
+                ]))
+    train_loader_all_aug = torch.utils.data.DataLoader(train_dataset_aug)
+    examples = enumerate(train_loader_all_aug)
+    train_raw_idx = []
+    train_raw_target = []
+    for i in examples:
+            train_raw_idx.append(i[0])
+            train_raw_target.append(i[1][1].numpy()[0])
+    target_keys  = list(set(train_raw_target))
+    train_raw_target = np.array(train_raw_target)
+    train_raw_idx = np.array(train_raw_idx)
+    
+    target_idx = {}
+    val_idx = {}
+    train_idx = {}
+    subset_indices_train = []
+    for i in target_keys:
+        np.random.seed(i)
+        target_idx[i] = train_raw_idx[np.where(train_raw_target==i)[0]]
+        np.random.shuffle(target_idx[i])
+    #     print(np.all(train_raw_target[target_idx[i]]==i))
+        split_point= int(0.15 * len(target_idx[i]))
+        train_idx[i] = target_idx[i][split_point:]
+    #     print(len(target_idx[i]) == len(val_idx[i])+len(train_idx[i]))
+    #     print(len(val_idx[i])/len(target_idx[i]))
+        subset_indices_train = subset_indices_train + list(train_idx[i])
+    subset_indices_train = np.array(subset_indices_train)
+    np.random.seed(10)
+    np.random.shuffle(subset_indices_train)
+  
+    
+    
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset_aug, batch_size=args.batch_size,
+        sampler=SubsetRandomSampler(subset_indices_train)
+    )
+    
 
     # Load your model [fcNet, ConvNet, Net]
-    model = fcNet().to(device)
+#     model = fcNet().to(device)
+    model = Net().to(device)
 
     # Try different optimzers here [Adam, SGD, RMSprop]
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
@@ -219,15 +344,55 @@ def main():
     scheduler = StepLR(optimizer, step_size=args.step, gamma=args.gamma)
 
     # Training loop
+    TRAIN_ACCURACY = []; TEST_ACCURACY = [];TRAIN_LOSS = []; TEST_LOSS = []
     for epoch in range(1, args.epochs + 1):
-        train(args, model, device, train_loader, optimizer, epoch)
-        test(model, device, val_loader)
+        train_accuracy,train_loss = train(args, model, device, train_loader, optimizer, epoch)
+        test_accuracy,test_loss = test(model, device, val_loader)
         scheduler.step()    # learning rate scheduler
-
+        TRAIN_ACCURACY.append(train_accuracy)
+        TEST_ACCURACY.append(test_accuracy)
+        TRAIN_LOSS.append(train_loss)
+        TEST_LOSS.append(test_loss)
+    TRAIN_ACCURACY = np.array(TRAIN_ACCURACY)
+    TRAIN_LOSS = np.array(TRAIN_LOSS)
+    TEST_ACCURACY = np.array(TEST_ACCURACY)
+    TEST_LOSS = np.array(TEST_LOSS)
+    print(TRAIN_ACCURACY)
+    print(TEST_LOSS)
+    
+    import csv
+    exp_name = 'Net_aug_full'
+    with open('./figures/'+exp_name+'.csv', 'w', newline='') as csvfile:
+        spamwriter = csv.writer(csvfile, delimiter=' ',
+                            quotechar='|', quoting=csv.QUOTE_MINIMAL)
+        spamwriter.writerow(['Epoch','TRAIN_ACCURACY','TEST_ACCURACY','TRAIN_LOSS','TEST_LOSS'])
+        for iepoch in range(args.epochs):
+            spamwriter.writerow([iepoch+1, TRAIN_ACCURACY[iepoch], TEST_ACCURACY[iepoch],TRAIN_LOSS[iepoch].item(),TEST_LOSS[iepoch]])
+    
+    
+    
         # You may optionally save your model at each epoch here
-
+    ### plot accuracies ###
+    plt.figure(figsize = (10,3),dpi=100)
+    plt.subplot(1,2,1)
+#     mask = np.where(np.isfinite(nTRAIN_ACCRUACY)
+    plt.scatter(range(1, args.epochs + 1),TRAIN_ACCURACY,label='TRAIN')
+    plt.scatter(range(1, args.epochs + 1),TEST_ACCURACY,label='VALIDATION')
+    plt.xlabel('epoch')
+    plt.ylabel('accuracy')
+    plt.legend()
+    plt.title('Net with data augmentation')
+    plt.subplot(1,2,2)
+    plt.scatter(range(1, args.epochs + 1),TRAIN_LOSS,label='TRAIN')
+    plt.scatter(range(1, args.epochs + 1),TEST_LOSS,label='VALIDATION')
+    plt.xlabel('epoch')
+    plt.ylabel('loss')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('./figures/'+exp_name+'.png')
+    
     if args.save_model:
-        torch.save(model.state_dict(), "mnist_model.pt")
+        torch.save(model.state_dict(), "best_mnist_model.pt")
 
 
 if __name__ == '__main__':
